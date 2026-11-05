@@ -38,6 +38,7 @@ main{max-width:1080px;margin:0 auto;padding:28px 20px 64px}
 .facts li{background:var(--surface2);border-radius:999px;padding:5px 13px;font-size:14px;font-weight:600;color:var(--text)}
 .facts .live{display:flex;align-items:center;gap:7px}
 .dot{width:8px;height:8px;border-radius:50%;background:#3ddc84}
+.dot.off{background:#7a7e89}
 .actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}
 .btn{display:inline-flex;align-items:center;gap:9px;border:0;cursor:pointer;font:inherit;font-weight:700;font-size:16px;padding:13px 22px;border-radius:12px;transition:background .15s}
 .btn svg{width:20px;height:20px;flex:none}
@@ -55,6 +56,10 @@ main{max-width:1080px;margin:0 auto;padding:28px 20px 64px}
 .card h2{margin:0 0 4px;font-size:19px;letter-spacing:-.2px}
 .sub{margin:0;color:var(--muted);font-size:14px}
 .badge{display:inline-block;margin-left:8px;vertical-align:2px;font-size:12px;font-weight:700;color:var(--red-hover);background:rgba(232,68,74,.14);padding:2px 9px;border-radius:999px}
+.head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.range{display:flex;gap:4px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:3px}
+.range button{font:inherit;font-size:13px;font-weight:700;color:var(--muted);background:none;border:0;border-radius:7px;padding:5px 12px;cursor:pointer}
+.range button[aria-pressed="true"]{background:var(--red);color:#fff}
 .chart{margin-top:18px;width:100%;height:auto;display:block}
 .chart text{fill:var(--muted);font-size:11px;font-family:inherit}
 
@@ -97,7 +102,7 @@ footer{max-width:1080px;margin:0 auto;padding:0 20px 40px;color:var(--muted);fon
       <h1>NifeSMP</h1>
       <p class="tag">A modded Minecraft survival server. Install the modpack in one click, join with <strong>nifesmp.net</strong>, and play with the community.</p>
       <ul class="facts">
-        <li class="live"><span class="dot"></span><span id="online">0 online</span></li>
+        <li class="live"><span class="dot off" id="dot"></span><span id="online">Checking…</span></li>
         <li>Minecraft 1.21.11</li>
         <li>Fabric</li>
         <li>Modded survival</li>
@@ -121,8 +126,16 @@ footer{max-width:1080px;margin:0 auto;padding:0 20px 40px;color:var(--muted);fon
 
   <div class="grid">
     <section class="card">
-      <h2>Players online<span class="badge">Placeholder data</span></h2>
-      <p class="sub">Last 24 hours</p>
+      <div class="head">
+        <div>
+          <h2>Players online<span class="badge" id="peak" hidden></span></h2>
+          <p class="sub">Updated every 10 minutes</p>
+        </div>
+        <div class="range" role="group" aria-label="Time range">
+          <button type="button" data-range="86400" aria-pressed="true">24 hours</button>
+          <button type="button" data-range="604800" aria-pressed="false">7 days</button>
+        </div>
+      </div>
       <svg class="chart" id="chart" viewBox="0 0 720 260" role="img" aria-label="Player count over the last 24 hours"></svg>
     </section>
 
@@ -148,12 +161,13 @@ footer{max-width:1080px;margin:0 auto;padding:0 20px 40px;color:var(--muted);fon
 <script>
 // ---- EDIT THESE ----
 var DOWNLOAD_URL = "#";                       // link to your modpack file or page
-var DISCORD_URL  = "#";                       // your Discord invite, e.g. https://discord.gg/yourinvite
+var DISCORD_URL  = "https://discord.gg/ssUyYTeFvm";
 var SERVER_IP    = "nifesmp.net";
-var VIDEO_ID     = "";                        // YouTube video ID, e.g. dQw4w9WgXcQ (the part after v=). Empty shows the placeholder.
-// Placeholder: players online per hour, oldest to newest (24 values)
-var PLAYERS = [3,2,2,1,1,2,4,6,8,9,11,12,13,12,14,16,18,21,24,22,19,14,9,5];
+var VIDEO_ID     = "";                        // YouTube video ID (the part after v=). Empty shows the placeholder.
 // --------------------
+
+var HISTORY = [];      // [{t: unix seconds, p: players}] loaded from data/players.json
+var RANGE = 86400;     // seconds shown on the graph
 
 document.getElementById("download").href = DOWNLOAD_URL;
 ["discord","navDiscord"].forEach(function(id){ document.getElementById(id).href = DISCORD_URL; });
@@ -161,7 +175,6 @@ document.getElementById("copy").textContent = SERVER_IP;
 if (VIDEO_ID) {
   document.getElementById("video").innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + encodeURIComponent(VIDEO_ID) + '" title="How to join NifeSMP" allow="encrypted-media; picture-in-picture" allowfullscreen loading="lazy"></iframe>';
 }
-document.getElementById("online").textContent = PLAYERS[PLAYERS.length-1] + " online";
 
 document.getElementById("copy").addEventListener("click", function(){
   var note = document.getElementById("copied");
@@ -170,29 +183,71 @@ document.getElementById("copy").addEventListener("click", function(){
   catch(e){ done("Press Ctrl+C to copy"); }
 });
 
-(function drawChart(){
+function setOnline(count, isOnline){
+  document.getElementById("online").textContent = isOnline ? count + " online" : "Offline";
+  document.getElementById("dot").className = isOnline ? "dot" : "dot off";
+}
+
+// Current player count: live lookup, falling back to the latest saved data point
+function loadLive(){
+  fetch("https://api.mcstatus.io/v2/status/java/" + SERVER_IP)
+    .then(function(r){ return r.json(); })
+    .then(function(d){ setOnline(d.online && d.players ? d.players.online : 0, !!d.online); })
+    .catch(function(){
+      var last = HISTORY[HISTORY.length - 1];
+      if (last) setOnline(last.p, last.o !== false);
+      else document.getElementById("online").textContent = "Status unavailable";
+    });
+}
+
+function drawChart(){
   var svg = document.getElementById("chart");
-  var W=720, H=260, L=36, R=10, T=12, B=28;
-  var max = Math.max.apply(null, PLAYERS), top = Math.ceil((max+1)/5)*5;
-  var n = PLAYERS.length, iw = W-L-R, ih = H-T-B;
-  function x(i){ return L + iw*i/(n-1); }
+  var W=720, H=260, L=36, R=10, T=12, B=28, iw=W-L-R, ih=H-T-B;
+  var now = Math.floor(Date.now()/1000), start = now - RANGE;
+  var pts = HISTORY.filter(function(d){ return d.t >= start; });
+  var peak = document.getElementById("peak");
+
+  if (pts.length < 2) {
+    peak.hidden = true;
+    svg.innerHTML = '<text x="'+(W/2)+'" y="'+(H/2)+'" text-anchor="middle" style="font-size:14px">Collecting data. Check back soon.</text>';
+    return;
+  }
+  var max = Math.max.apply(null, pts.map(function(d){ return d.p; }));
+  var top = Math.max(5, Math.ceil((max+1)/5)*5);
+  function x(t){ return L + iw*(t-start)/RANGE; }
   function y(v){ return T + ih*(1 - v/top); }
+  peak.hidden = false; peak.textContent = "Peak " + max;
+
   var s = "";
   for (var g=0; g<=4; g++){
     var v = top*g/4, gy = y(v);
-    s += '<line x1="'+L+'" x2="'+(W-R)+'" y1="'+gy+'" y2="'+gy+'" stroke="#33363e" stroke-width="1"/>';
+    s += '<line x1="'+L+'" x2="'+(W-R)+'" y1="'+gy+'" y2="'+gy+'" stroke="#33363e"/>';
     s += '<text x="'+(L-8)+'" y="'+(gy+4)+'" text-anchor="end">'+Math.round(v)+'</text>';
   }
-  var pts = PLAYERS.map(function(v,i){ return x(i).toFixed(1)+","+y(v).toFixed(1); });
+  var line = pts.map(function(d){ return x(d.t).toFixed(1)+","+y(d.p).toFixed(1); });
   s += '<defs><linearGradient id="fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8444a" stop-opacity=".38"/><stop offset="1" stop-color="#e8444a" stop-opacity="0"/></linearGradient></defs>';
-  s += '<polygon points="'+x(0)+','+y(0)+' '+pts.join(" ")+' '+x(n-1)+','+y(0)+'" fill="url(#fill)"/>';
-  s += '<polyline points="'+pts.join(" ")+'" fill="none" stroke="#e8444a" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>';
-  [0,6,12,18,23].forEach(function(i){
-    var label = i===23 ? "now" : (23-i)+"h ago";
-    s += '<text x="'+x(i)+'" y="'+(H-8)+'" text-anchor="'+(i===0?"start":i===23?"end":"middle")+'">'+label+'</text>';
-  });
+  s += '<polygon points="'+x(pts[0].t)+','+y(0)+' '+line.join(" ")+' '+x(pts[pts.length-1].t)+','+y(0)+'" fill="url(#fill)"/>';
+  s += '<polyline points="'+line.join(" ")+'" fill="none" stroke="#e8444a" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>';
+  for (var i=0; i<=4; i++){
+    var ago = RANGE*(1-i/4);
+    var label = i===4 ? "now" : (RANGE===86400 ? Math.round(ago/3600)+"h ago" : Math.round(ago/86400)+"d ago");
+    s += '<text x="'+(L+iw*i/4)+'" y="'+(H-8)+'" text-anchor="'+(i===0?"start":i===4?"end":"middle")+'">'+label+'</text>';
+  }
   svg.innerHTML = s;
-})();
+}
+
+Array.prototype.forEach.call(document.querySelectorAll(".range button"), function(b){
+  b.addEventListener("click", function(){
+    RANGE = parseInt(b.getAttribute("data-range"), 10);
+    Array.prototype.forEach.call(document.querySelectorAll(".range button"), function(o){ o.setAttribute("aria-pressed", o === b ? "true" : "false"); });
+    drawChart();
+  });
+});
+
+fetch("data/players.json?t=" + Date.now())
+  .then(function(r){ return r.ok ? r.json() : []; })
+  .catch(function(){ return []; })
+  .then(function(d){ HISTORY = Array.isArray(d) ? d : []; drawChart(); loadLive(); });
 </script>
 </body>
 </html>
